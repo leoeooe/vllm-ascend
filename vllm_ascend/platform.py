@@ -117,6 +117,9 @@ class NPUPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
+        from vllm_ascend.spec_decode.minedraft import validate_minedraft_config
+
+        validate_minedraft_config(vllm_config)
         # initialize ascend config from vllm additional_config
         ascend_config = init_ascend_config(vllm_config)
 

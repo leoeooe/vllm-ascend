@@ -154,4 +154,7 @@ def create_worker(
         num_spec_prefill_steps=num_spec_prefill_steps)
 
 
-SpecDecodeWorker.create_worker = classmethod(create_worker)
+# MineDraft installs its factory before NPUWorker imports the worker patches.
+# Replacing it here would lose the parallel arguments and worker selection.
+if "create_worker" not in getattr(SpecDecodeWorker, "_mine_patches", {}):
+    SpecDecodeWorker.create_worker = classmethod(create_worker)

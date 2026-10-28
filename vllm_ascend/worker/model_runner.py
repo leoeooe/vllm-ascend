@@ -944,8 +944,11 @@ class NPUModelRunnerBase(ModelRunnerBase[TModelInputForNPU]):
         # However we must bypass attention selection altogether for some models
         # used for speculative decoding to avoid a divide-by-zero in
         # model_config.get_head_size()
+        from vllm_ascend.spec_decode.minedraft import \
+            get_minedraft_model_parallel_config
+
         num_attn_heads = self.model_config.get_num_attention_heads(
-            self.parallel_config)
+            get_minedraft_model_parallel_config(self.vllm_config))
         needs_attn_backend = (num_attn_heads != 0
                               or self.model_config.is_attention_free)
 
@@ -1264,12 +1267,22 @@ class NPUModelRunnerBase(ModelRunnerBase[TModelInputForNPU]):
 
 
 class NPUModelRunner(NPUModelRunnerBase[ModelInputForNPUWithSamplingMetadata]):
-    """
-    NPU model runner with sampling step.
-    """
+    """NPU model runner with sampling step."""
+
     _model_input_cls: Type[ModelInputForNPUWithSamplingMetadata] = (
         ModelInputForNPUWithSamplingMetadata)
     _builder_cls: Type[ModelInputForNPUBuilder] = ModelInputForNPUBuilder
+
+    @property
+    def is_driver(self) -> bool:
+        from vllm_ascend.spec_decode.minedraft import is_minedraft_parallel
+
+        if is_minedraft_parallel(self.vllm_config):
+            from minedraft.plugin.distributed.parallel_state import \
+                get_non_driver_tp_group
+
+            return get_non_driver_tp_group().is_first_rank
+        return self.is_driver_worker
 
     def make_model_input_from_broadcasted_tensor_dict(
         self,
@@ -1450,7 +1463,7 @@ class NPUModelRunner(NPUModelRunnerBase[ModelInputForNPUWithSamplingMetadata]):
 
             # Compute the logits in the last pipeline stage.
             if not get_pp_group().is_last_rank:
-                if (self.is_driver_worker
+                if (self.is_driver
                         and hidden_or_intermediate_states is not None
                         and isinstance(hidden_or_intermediate_states,
                                        IntermediateTensors)
@@ -1484,7 +1497,7 @@ class NPUModelRunner(NPUModelRunnerBase[ModelInputForNPUWithSamplingMetadata]):
                 hidden_or_intermediate_states,
             )
 
-        if self.is_driver_worker:
+        if self.is_driver:
             if model_input.async_callback is not None:
                 model_input.async_callback()
 
@@ -1516,7 +1529,7 @@ class NPUModelRunner(NPUModelRunnerBase[ModelInputForNPUWithSamplingMetadata]):
                                              model_forward_time)
 
         if model_input.inputs_embeds is not None:
-            if self.is_driver_worker:
+            if self.is_driver:
                 sampled = broadcast_tensor_dict(
                     {"token_ids": output.sampled_token_ids})
             else:
@@ -1524,7 +1537,7 @@ class NPUModelRunner(NPUModelRunnerBase[ModelInputForNPUWithSamplingMetadata]):
             if sampled["token_ids"] is not None:
                 sampled_token_embeds = self.model.get_input_embeddings(
                     sampled["token_ids"].squeeze(1))
-                if self.is_driver_worker:
+                if self.is_driver:
                     self.sampler.include_gpu_probs_tensor = \
                         orig_include_gpu_probs
 
@@ -1536,7 +1549,7 @@ class NPUModelRunner(NPUModelRunnerBase[ModelInputForNPUWithSamplingMetadata]):
                         sequence_group_output.samples[
                             0].output_embed = token_embed
 
-        if not self.is_driver_worker:
+        if not self.is_driver:
             return []
 
         if self.return_hidden_states:

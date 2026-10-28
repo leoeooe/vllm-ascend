@@ -30,6 +30,7 @@ def init_ascend_model_parallel(
     expert_tensor_parallel_size: int = 1,
     world_size: Optional[int] = None,
     backend: Optional[str] = None,
+    independent_groups: bool = False,
 ):
     if model_parallel_initialized():
         return
@@ -41,6 +42,22 @@ def init_ascend_model_parallel(
     num_expert_tensor_parallel_groups = expert_parallel_size
 
     global _EP
+    global _ETP
+    if independent_groups:
+        # MineDraft supports dense models only. Keep these auxiliary groups
+        # local so neither the target nor draft accidentally waits for the
+        # other model's ranks in an Ascend-specific collective.
+        group_ranks = [[rank] for rank in range(world_size)]
+        _EP = init_model_parallel_group(group_ranks,
+                                        get_world_group().local_rank,
+                                        backend,
+                                        group_name="ep")
+        _ETP = init_model_parallel_group(group_ranks,
+                                         get_world_group().local_rank,
+                                         backend,
+                                         group_name="etp")
+        return
+
     group_ranks = []
     for i in range(num_expert_parallel_groups):
         ranks = list(range(i, world_size, num_expert_parallel_groups))
@@ -52,7 +69,6 @@ def init_ascend_model_parallel(
                                     group_name="ep")
 
     group_ranks = []
-    global _ETP
     for i in range(num_expert_tensor_parallel_groups):
         ranks = list(
             range(i * expert_tensor_parallel_size,

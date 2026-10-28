@@ -31,8 +31,10 @@ class NPUCommunicator(DeviceCommunicatorBase):
                  unique_name: str = ""):
         super().__init__(cpu_group, device, device_group, unique_name)
         # TODO(hz): Refer to CudaCommunicator's implementation to integrate PyHcclCommunicator
-        # init device according to rank
-        self.device = torch.npu.current_device()
+        # Base.recv allocates tensors on self.device. Keep the NPU device
+        # type explicit: an integer device index can resolve to CUDA.
+        self.device = (device if device is not None else
+                       torch.device("npu", torch.npu.current_device()))
 
     def all_to_all(self,
                    input_: torch.Tensor,

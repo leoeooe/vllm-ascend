@@ -336,10 +336,15 @@ class NPUWorker(LocalOrDistributedWorkerBase):
         self._warm_up_model()
 
     def _init_cache_engine(self):
+        from vllm_ascend.spec_decode.minedraft import \
+            get_minedraft_model_parallel_config
+
         assert self.cache_config.num_gpu_blocks is not None
+        model_parallel_config = get_minedraft_model_parallel_config(
+            self.vllm_config)
         self.cache_engine = [
             CacheEngine(self.cache_config, self.model_config,
-                        self.parallel_config, self.device_config)
+                        model_parallel_config, self.device_config)
             for _ in range(self.parallel_config.pipeline_parallel_size)
         ]
         import torch_npu
@@ -531,9 +536,13 @@ class NPUWorker(LocalOrDistributedWorkerBase):
     def get_cache_block_size_bytes(self) -> int:
         """Get the size of the KV cache block size in bytes.
         """
+        from vllm_ascend.spec_decode.minedraft import \
+            get_minedraft_model_parallel_config
+
         return CacheEngine.get_cache_block_size(self.cache_config,
                                                 self.model_config,
-                                                self.parallel_config)
+                                                get_minedraft_model_parallel_config(
+                                                    self.vllm_config))
 
     def _init_worker_distributed_environment(
             self,
@@ -548,13 +557,23 @@ class NPUWorker(LocalOrDistributedWorkerBase):
         init_distributed_environment(parallel_config.world_size, rank,
                                      distributed_init_method, local_rank,
                                      backend)
-        ensure_model_parallel_initialized(
-            parallel_config.tensor_parallel_size,
-            parallel_config.pipeline_parallel_size)
+        from vllm_ascend.spec_decode.minedraft import is_minedraft_parallel
+
+        minedraft_parallel = is_minedraft_parallel(vllm_config)
+        if minedraft_parallel:
+            ensure_model_parallel_initialized(
+                parallel_config.tensor_parallel_size,
+                parallel_config.pipeline_parallel_size,
+                initialize_non_driver_tp_group=True)
+        else:
+            ensure_model_parallel_initialized(
+                parallel_config.tensor_parallel_size,
+                parallel_config.pipeline_parallel_size)
         init_ascend_model_parallel(
             parallel_config.expert_parallel_size,
             parallel_config.expert_tensor_parallel_size,
             parallel_config.world_size_across_dp,
+            independent_groups=minedraft_parallel,
         )
         ensure_kv_transfer_initialized(vllm_config)
 
