@@ -1,5 +1,7 @@
 # MineDraft 并行投机解码（V0）
 
+四数据集、AR/Standard SD/MineDraft 对比、k 扫描及性能汇总见 [四数据集复现实验](minedraft_datasets.md)。
+
 此分支把 MineDraft 的批次交错调度接入 Ascend NPU：一张专用草稿卡生成候选 token，其余卡组成目标模型 TP 组，交错执行两组请求的草稿生成和验证。共享调度、缓存回退和拒绝采样算法仍位于 MineDraft 包，vllm-ascend 提供 NPU 执行与 HCCL 通信适配。
 
 本实现面向 **vLLM 0.9.2 + vllm-ascend 0.9.2rc1 + 本分支 MineDraft**。本地尚未进行 NPU 实机验收；吞吐收益与模型、批量、接受率及通信开销有关，需在目标机器测量。
@@ -129,3 +131,58 @@ python examples/offline_inference_minedraft.py \
 可用 `--mode parallel` 单独运行并行模式；`--mode baseline` 单独保存目标基线。单独模式仍沿用“第一张可见卡预留给草稿”的卡号约定，便于比较同一组目标卡。
 
 随机采样需要独立的分布正确性验证，不能要求两次随机采样生成完全相同的文本。当前示例不代替在线并发、取消请求、内存抢占和性能压测。
+
+## Qwen3 TP=4 离线性能指标
+
+`examples/offline_inference_minedraft_qwen3_tp4.py` 使用 Qwen3-32B 作为目标模型（TP=4），Qwen3-0.6B 作为草稿模型（TP=1），共需五张 NPU。默认预热一轮、正式运行三轮，每轮八个请求。可增加请求数和输出长度：
+
+```bash
+export ASCEND_RT_VISIBLE_DEVICES=4,0,1,2,3
+export TARGET_MODEL=/models/Qwen3-32B
+export DRAFT_MODEL=/models/Qwen3-0.6B
+python examples/offline_inference_minedraft_qwen3_tp4.py \
+  --warmup-runs 1 \
+  --runs 3 \
+  --num-prompts 32 \
+  --max-tokens 256 \
+  --max-num-seqs 4 \
+  --output minedraft-results/qwen3-tp4.json
+```
+
+每轮和汇总均输出实际输入/输出 token 数、推理耗时、输出 token/s、总 token/s、请求/s，以及请求完成延迟 E2E、首 token 延迟 TTFT、每请求平均 TPOT 和首次调度排队时间的 mean/p50/p95/p99。JSON 另外保留配置、各轮逐请求数据和采样器计数差值。`--print-outputs` 可打印最后一轮回答；`--ignore-eos` 可用于固定输出长度测试。
+
+计时仅覆盖 `generate()`，包含请求提交、排队、prefill、decode 和输出处理，排除模型加载、外部 chat template 分词、预热、打印和指标读取。汇总吞吐量为各轮实际 token 总数除以各轮推理总耗时。模型及引擎初始化时间单独记录。
+
+有效草稿接受率为“首次拒绝前接受的草稿前缀 token 数 / 参与验证的草稿 token 数”，使用正式运行前后的累计计数差值，不含预热，也不包含未进入验证的草稿；验证计数可能包含最终因 EOS 或长度上限被截断的 token。TTFT/E2E 使用引擎请求时间戳并包含排队；TPOT 为每请求 `(完成时间 - 首 token 时间) / (输出 token 数 - 1)`，不代表投机解码批量返回 token 时的逐 token 间隔分布。缺失指标显示 `N/A`，JSON 中保存 `null` 或不可用原因。
+
+这是重复八条内置问题的离线工作负载；少量样本的延迟百分位仅供观察。该脚本没有运行关闭 MineDraft 的目标模型基线，因此不报告加速比。
+
+## Qwen3 TP=4 baseline 性能测试
+
+`examples/offline_inference_baseline_qwen3_tp4.py` 是独立脚本，导入 vLLM 前设置 `VLLM_ASCEND_ENABLE_MINEDRAFT=0`，并将插件白名单限定为 Ascend 插件。每次须在新 Python 进程中运行。它提供两种模式：
+
+- `--mode sd`（默认）：Standard SD，目标 Qwen3-32B TP=4，草稿 Qwen3-0.6B TP=1，与目标共享四张 NPU。这对应 MineDraft README 和 `scripts/experiment_1_sequential.sh` 使用的主要对照方案。
+- `--mode ar`：仅目标 Qwen3-32B TP=4，关闭投机解码，用于补充比较。
+
+可沿用 MineDraft 的五卡列表；脚本会跳过第一张专用草稿卡，仅使用后四张目标卡。也可直接传入四张目标卡。下面的命令使用与上一节相同的请求参数：
+
+```bash
+export ASCEND_RT_VISIBLE_DEVICES=4,0,1,2,3
+export TARGET_MODEL=/models/Qwen3-32B
+export DRAFT_MODEL=/models/Qwen3-0.6B
+python examples/offline_inference_baseline_qwen3_tp4.py \
+  --mode sd \
+  --warmup-runs 1 --runs 3 --num-prompts 32 \
+  --max-tokens 256 --max-num-seqs 4 --num-speculative-tokens 5 \
+  --output minedraft-results/baseline-sd-qwen3-tp4.json
+
+python examples/offline_inference_baseline_qwen3_tp4.py \
+  --mode ar \
+  --warmup-runs 1 --runs 3 --num-prompts 32 \
+  --max-tokens 256 --max-num-seqs 4 \
+  --output minedraft-results/baseline-ar-qwen3-tp4.json
+```
+
+预热、计时范围、吞吐量和请求延迟统计与 MineDraft 性能脚本一致。SD 同时报告逐位置接受率和有效前缀接受率；前者包含首次拒绝后的独立通过位置。后者基于原生 vLLM 0.9.2 固定 k 路径，由 `采样器输出 token 数 - 验证草稿 token 数 / k` 得到接受前缀数，再除以验证草稿数。计数不含预热，可能包含最终因停止条件而被截断的 token。AR 的草稿指标为不可用。
+
+对比时使用相同目标物理卡、模型精度、请求数、输出长度、采样参数和 EOS 选项；需要固定长度时，两份脚本都添加 `--ignore-eos`。这里沿用前一性能示例的 `temperature=0` 和内置问题，并未复现原项目完整的数据集及随机采样实验。MineDraft 使用五卡，baseline 使用四卡；MineDraft 还会扩展两组交错调度容量，因此相同 `max-num-seqs` 不表示相同总调度容量。
