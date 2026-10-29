@@ -46,6 +46,12 @@ def _validate_job(job, bundle):
         raise ValueError("Unknown benchmark mode")
     if job["phase"] not in ("correctness", "performance"):
         raise ValueError("Unknown benchmark phase")
+    check_cases = job.get("check_cases", ["single", "queued"])
+    if (not isinstance(check_cases, list) or not check_cases
+            or any(case not in ("single", "queued") for case in check_cases)
+            or len(set(check_cases)) != len(check_cases)):
+        raise ValueError("check_cases must be a nonempty list of unique "
+                         "single/queued scenarios")
     for name in ("target_tp", "max_model_len", "max_num_seqs", "max_tokens",
                  "runs", "check_num_prompts", "check_max_tokens"):
         value = job[name]
@@ -260,8 +266,9 @@ def _print_summary(label, summary, speculation):
 def _run_correctness(llm, sampling_params_cls, dataset, job):
     records = dataset["records"]
     results = []
-    for case, selected in (("single", records[:1]),
-                           ("queued", records[:job["check_num_prompts"]])):
+    # Legacy saved jobs omit check_cases and retain the original two scenarios.
+    for case in job.get("check_cases", ["single", "queued"]):
+        selected = records[:1] if case == "single" else records[:job["check_num_prompts"]]
         lengths = (1, min(2, job["check_max_tokens"]), job["check_max_tokens"])
         params = [sampling_params_cls(
             temperature=0, top_p=1, ignore_eos=True,

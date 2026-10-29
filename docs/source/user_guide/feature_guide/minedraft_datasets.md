@@ -112,6 +112,14 @@ python examples/benchmark_minedraft_datasets.py \
 
 默认先以 AR 为参照，对每种待测模式/k 执行独立的 greedy 检查。它使用相同的输入 token、`temperature=0`、`ignore_eos=True`，覆盖 single 和长短混合 queued 请求。默认 queued 请求数为 `2 * max_num_seqs + 1`，因此能覆盖超出两组交错容量后的补入；实际数据不足时会明确记录 `passed_limited_coverage`，不会伪造更多样本。
 
+暂时不进行 queued 正确性检查时，在运行命令中添加：
+
+```bash
+--check-cases single
+```
+
+这会保留 single 检查，完全跳过 queued 检查；通过后继续正式性能测试。报告记录 `cases: ["single"]`、`queued_checked: false` 和 `passed_limited_coverage`，表示只验证了选定场景。恢复两种检查可移除此参数，或使用 `--check-cases single queued`。此选项不改变正式性能阶段的批量提交；如果整个测试都要仅有一个请求，还需设置 `--num-prompts 1 --max-num-seqs 1`，这不适合评估批量吞吐收益。
+
 `correctness.json` 保存所有已比较请求的 mismatch、首次不同 token 下标（从 0 开始）以及两侧 token ID；对应 worker JSON 保存完整生成文本。任意 mismatch 默认阻止性能阶段，退出码为 2。之前 TP=4 的 queued 差异并未因新增 benchmark 自动修复，若再次出现应保留这些诊断结果继续定位。
 
 可选 `--continue-on-mismatch` 在差异后继续测性能，但最终报告仍保持失败状态，退出码仍为 2。`--skip-correctness` 只测性能，结果明确标记 `not_run` / `completed_unvalidated`。这两个选项用于测量或诊断，均不会声明正确复现。

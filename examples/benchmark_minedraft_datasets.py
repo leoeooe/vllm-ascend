@@ -81,6 +81,10 @@ def parse_args():
                         "must match its configuration.")
     parser.add_argument("--prepare-only", action="store_true",
                         help="Prepare/tokenize datasets without loading an LLM.")
+    parser.add_argument("--check-cases", nargs="+", choices=("single", "queued"),
+                        default=["single", "queued"],
+                        help="Correctness scenarios; use 'single' to skip the "
+                        "queued check. Does not change performance batching.")
     parser.add_argument("--check-num-prompts", type=int,
                         help="Default 2*max-num-seqs+1; capped by dataset size.")
     parser.add_argument("--check-max-tokens", type=int, default=32)
@@ -113,7 +117,7 @@ def parse_args():
         args.check_num_prompts = 2 * args.max_num_seqs + 1
     if args.check_num_prompts <= 0:
         parser.error("--check-num-prompts must be positive")
-    for field in ("datasets", "modes", "k_values"):
+    for field in ("datasets", "modes", "k_values", "check_cases"):
         values = getattr(args, field)
         if len(values) != len(set(values)):
             parser.error(f"Duplicate values in --{field.replace('_', '-')}")
@@ -230,7 +234,8 @@ def run_job(args, directory, bundle, mode, k, phase):
     job = {key: getattr(args, key) for key in (
         "model", "draft_model", "target_tp", "dtype", "gpu_memory_utilization",
         "max_model_len", "max_num_seqs", "seed", "temperature", "top_p",
-        "max_tokens", "warmup_runs", "runs", "check_num_prompts", "check_max_tokens")}
+        "max_tokens", "warmup_runs", "runs", "check_num_prompts", "check_max_tokens",
+        "check_cases")}
     job.update(mode=mode, k=k, phase=phase, check=phase == "correctness",
                ignore_eos=not args.respect_eos, output=str(output),
                visible_devices=args.devices if mode == "minedraft" else args.devices[1:],
@@ -355,7 +360,8 @@ def main():
     directory.mkdir(parents=True, exist_ok=True)
     summary = {
         "schema_version": 1, "status": "preparing", "performance_completed": False,
-        "correctness": {"status": "not_run", "comparisons": []},
+        "correctness": {"status": "not_run", "cases": args.check_cases,
+                        "comparisons": []},
         "config": {key: str(value) if isinstance(value, Path) else value
                    for key, value in vars(args).items()},
         "jobs": [],
@@ -394,13 +400,21 @@ def main():
         if not args.skip_correctness:
             summary["status"] = "checking"
             summary["correctness"]["status"] = "running"
+            check_queued = "queued" in args.check_cases
             summary["correctness"]["coverage"] = [
                 {"dataset": item["name"],
-                 "queued_requests": min(len(item["records"]), args.check_num_prompts),
-                 "exceeds_two_batch_capacity": min(len(item["records"]), args.check_num_prompts)
+                 "queued_checked": check_queued,
+                 "queued_requests": min(len(item["records"]), args.check_num_prompts)
+                 if check_queued else 0,
+                 "exceeds_two_batch_capacity": check_queued and
+                 min(len(item["records"]), args.check_num_prompts)
                  > 2 * args.max_num_seqs} for item in bundle["datasets"]]
+            if not check_queued:
+                print("Queued correctness check skipped (--check-cases single). "
+                      "Performance batching remains configured by num-prompts "
+                      "and max-num-seqs.", flush=True)
             for item in summary["correctness"]["coverage"]:
-                if not item["exceeds_two_batch_capacity"]:
+                if check_queued and not item["exceeds_two_batch_capacity"]:
                     print(f"Limited queued coverage: {item['dataset']} has "
                           f"{item['queued_requests']} check requests, needs "
                           f"at least {2 * args.max_num_seqs + 1}.", flush=True)
@@ -425,8 +439,9 @@ def main():
                 "failed" if any(item["status"] == "failed" for item in comparisons)
                 else "passed" if comparisons else "not_applicable_ar_only")
             if (summary["correctness"]["status"] == "passed"
-                    and not all(item["exceeds_two_batch_capacity"]
-                                for item in summary["correctness"]["coverage"])):
+                    and (set(args.check_cases) != {"single", "queued"}
+                         or not all(item["exceeds_two_batch_capacity"]
+                                    for item in summary["correctness"]["coverage"]))):
                 summary["correctness"]["status"] = "passed_limited_coverage"
             write_json(directory / "correctness.json", summary["correctness"])
             if summary["correctness"]["status"] == "failed" and not args.continue_on_mismatch:
