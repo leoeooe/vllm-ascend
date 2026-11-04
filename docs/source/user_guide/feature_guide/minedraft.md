@@ -1,5 +1,7 @@
 # MineDraft 多批次投机解码（实验性）
 
+按提交顺序整理的文件、函数修改及实现过程，参见 [MineDraft 实现过程与函数修改记录](minedraft_implementation.md)。
+
 本分支实现独立草稿引擎与验证引擎之间的多批次流水线。一个 batch 等待草稿时，验证引擎可以运行另一个已准备好的 batch。草稿引擎和各验证副本拥有独立进程、设备组、KV cache 和图捕获缓冲区。
 
 实现参考 [MineDraft 论文](https://arxiv.org/abs/2603.18016) 的批次间 drafting/verification 重叠机制，扩展为可配置的 batch 数量和非对称模型副本数量。这里的“双流”指两个阶段并发推进；不同 NPU 上的计算流属于各自进程，不是在同一进程中复制两个 `torch.npu.Stream`。
