@@ -2,4 +2,4 @@
 pr: 0
 entries:
   - category: feature
-    text: Added an experimental offline MineDraft integration for one independently placed draft engine serving multiple TP verifier replicas. Each engine can use its native ACL decode graphs; the example includes replay diagnostics, explicit KV cache sizing, optional greedy-baseline verification, and short timing-only NPU profiling with compact multi-worker timelines.
+    text: Added an experimental offline MineDraft integration for one independently placed draft engine serving multiple TP verifier replicas. Each engine can use its native ACL decode graphs; the example includes replay diagnostics, explicit KV cache sizing, optional greedy-baseline verification, short timing-only NPU profiling with compact multi-worker timelines, and local GSM8K workloads with measured generation reports.

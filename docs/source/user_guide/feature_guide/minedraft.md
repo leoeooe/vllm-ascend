@@ -185,6 +185,34 @@ VLLM_BATCH_INVARIANT=1 /home/l00998189/vllm/.venv/bin/python \
 
 原始设备 `KERNEL_AICORE`/`KERNEL_AIVEC` 区间经并集去重后，草稿与任一验证副本的交集为 **67.58 ms**；这是本次短窗口存在设备计算重叠的证据，不是吞吐提升或请求时延估计。验收结果保存在同级父目录的 `timing-validation.json`，全部测试设备已释放。代码检查通过，Ascend profiler/合并工具 CPU 测试为 **23 passed**，vLLM 控制接口标准 pytest 为 **11 passed、32 subtests passed**。本机没有运行 MindStudio GUI，已检查 JSON 结构、原始时间戳、五个 worker 的设备任务和压缩包完整性；GUI 展示仍需在本地导入确认。
 
+## GSM8K 固定长度运行实验
+
+示例支持通过 `--dataset-path` 读取本地 GSM8K JSONL，并通过 `--dataset-offset` 指定从哪条记录开始，默认从第 0 条开始。`--num-prompts` 指定实际读取的记录数；不会通过重复内置 prompt 补齐数量。输入采用原始 completion 模板 `Question: {question}\nAnswer:`，不添加 chat template、few-shot 示例或参考答案。报告保留数据文件 SHA256、记录索引、问题、参考答案、生成文本和 token 数，便于复核。这是运行与调度实验，不是标准 GSM8K 准确率评测。
+
+2026-11-04 从 [GSM8K 官方仓库](https://github.com/openai/grade-school-math) 的提交 `3101c7d5072418e28b9008a6636bde82a006892c` 下载了原始 train/test 数据，保存到 `/home/l00998189/datasets/gsm8k/`。其中 `train.jsonl` 有 7,473 条记录，`test.jsonl` 有 1,319 条；同目录保存许可证、上游说明和下载校验清单 `manifest.json`。测试集 SHA256 为 `3730d312f6e3440559ace48831e51066acaca737f6eabec99bccb9e4b3c39d14`。
+
+本实验使用测试集前 32 条，分成 4 个 batch，每批 8 条；`K=5`，每条生成 128 token。沿用示例的 `ignore_eos=True`，用于固定长度负载。采用 `VLLM_BATCH_INVARIANT=0`，开启默认 prefix cache；这与此前用于逐 token 对照的 batch-invariant 配置不同。预热生成 8 token 后单独记录正式生成的时间线、图重放及投机计数增量，避免把预热计入测量。
+
+每次完整验证需要 `8 * (5 + 1) = 48` 个查询 token。示例根据 batch 请求数和 K 补充图捕获尺寸，避免原有上限 32 使正常验证回退 eager。`--max-num-batched-tokens 4096` 独立于单请求 `--max-model-len 1024`，为八条请求的 prefill 留出预算。每个 worker 显式使用 2 GiB KV cache；设备及容量须在运行前检查。
+
+在前述 CANN、`PYTHONPATH` 和 HCCL 环境中，从 Ascend 仓库运行：
+
+```bash
+VLLM_BATCH_INVARIANT=0 /home/l00998189/vllm/.venv/bin/python \
+    examples/minedraft_npu.py \
+    --target /home/d00832329/Qwen3-32B \
+    --draft /home/d00832329/Qwen3-0.6B \
+    --draft-devices 14 --verifier-devices '4,5;6,7' \
+    --dataset-path /home/l00998189/datasets/gsm8k/test.jsonl \
+    --dataset-offset 0 --num-prompts 32 --num-batches 4 \
+    --num-speculative-tokens 5 --max-tokens 128 \
+    --max-model-len 1024 --max-num-batched-tokens 4096 \
+    --kv-cache-memory-bytes 2147483648 --warmup-tokens 8 \
+    --report /home/l00998189/runtime/minedraft-gsm8k/20261104/report.json
+```
+
+该命令保存主机调用时间线，不生成整段 4,096 输出 token 的 NPU trace。主机调用交叠不能直接换算为设备计算交叠。`--profile-dir` 仍会采集整个正式生成，若添加该参数，文件体积会明显大于此前 4 条、每条 8 token 的精简采样。
+
 ## 当前范围与后续研究
 
 - 支持固定 K、多个 batch、独立 TP 验证副本、原生 target 拒绝采样及每个引擎的解码图。单引擎内部使用同步调度，跨引擎由控制器并发驱动。
