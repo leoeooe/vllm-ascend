@@ -11,6 +11,7 @@ import sys
 import tempfile
 import time
 import zipfile
+from copy import deepcopy
 from pathlib import Path
 
 import regex as re
@@ -68,6 +69,11 @@ def graph_capture_sizes(num_prompts, num_batches, num_speculative_tokens):
         raise ValueError("Prompt count, batch count, and speculative token count must be positive")
     batch_size = (num_prompts + num_batches - 1) // num_batches
     return sorted({1, 2, 4, 8, 16, 32, batch_size, batch_size * (num_speculative_tokens + 1)})
+
+
+def snapshot_diagnostics(llm):
+    """Freeze counters and the live controller timeline before generation."""
+    return deepcopy(llm.get_diagnostics())
 
 
 def measured_diagnostics(before, after):
@@ -340,7 +346,7 @@ def main():
             warmup_params = params.clone()
             warmup_params.max_tokens = warmup_tokens
             warmup_outputs = llm.generate(prompts, warmup_params)
-        before = llm.get_diagnostics()
+        before = snapshot_diagnostics(llm)
         if args.profile_dir:
             llm.start_profile("minedraft", profiler_kwargs={"timing_only": True})
         measurement = {

@@ -6,6 +6,7 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -84,3 +85,19 @@ def test_measured_diagnostics_exclude_warmup_without_subtracting_gauges(example)
         {"name": "vllm:spec_decode_num_accepted_tokens_per_pos", "values": [4, 2]},
     ]
     assert verifier["cumulative_metrics"][-1]["value"] == 0.2
+
+
+def test_measurement_snapshot_survives_live_timeline_appends(example):
+    """MineDraft get_diagnostics returns its live timeline, not a frozen copy."""
+    live_timeline = [{"kind": "draft", "batch_id": 0, "started": 1, "ended": 2}]
+
+    def get_diagnostics():
+        return {"timeline": live_timeline, "draft": {"workers": [], "metrics": []}, "verifiers": []}
+
+    llm = SimpleNamespace(get_diagnostics=get_diagnostics)
+    before = example.snapshot_diagnostics(llm)
+    live_timeline.append({"kind": "verify", "batch_id": 0, "started": 3, "ended": 4})
+    result = example.measured_diagnostics(before, llm.get_diagnostics())
+    assert result["timeline"] == [{"kind": "verify", "batch_id": 0, "started": 3, "ended": 4}]
+    assert len(live_timeline) == 2
+    assert len(before["timeline"]) == 1
