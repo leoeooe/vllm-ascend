@@ -29,6 +29,7 @@ import pytest
 from vllm_ascend.platform import (
     _downgrade_swa_bounded_replay,
     _swa_bounded_replay_unsupported_mode,
+    _validate_minedraft_scheduler_config,
 )
 
 # The modes whose ``schedule()`` is a full copy of an older upstream body.
@@ -77,6 +78,27 @@ def test_modes_that_reach_upstream_are_left_alone():
     """BatchJobAware calls super().schedule(); ShortRequestFirst only installs a
     request queue. Both inherit the rewind and must not be downgraded."""
     assert _swa_bounded_replay_unsupported_mode(_ascend_config()) is None
+
+
+@pytest.mark.parametrize(("mode", "overrides"), UNSUPPORTED_MODES)
+def test_minedraft_rejects_schedulers_that_bypass_batch_selection(mode, overrides):
+    config = SimpleNamespace(
+        speculative_config=SimpleNamespace(method="minedraft"),
+        scheduler_config=SimpleNamespace(scheduler_cls=None),
+    )
+    with pytest.raises(ValueError, match=mode):
+        _validate_minedraft_scheduler_config(config, _ascend_config(**overrides))
+
+
+def test_minedraft_rejects_custom_scheduler_class_but_allows_native_scheduler():
+    config = SimpleNamespace(
+        speculative_config=SimpleNamespace(method="minedraft"),
+        scheduler_config=SimpleNamespace(scheduler_cls="custom.Scheduler"),
+    )
+    with pytest.raises(ValueError, match="scheduler_cls"):
+        _validate_minedraft_scheduler_config(config, _ascend_config())
+    config.scheduler_config.scheduler_cls = None
+    _validate_minedraft_scheduler_config(config, _ascend_config())
 
 
 # --- the downgrade itself ----------------------------------------------------

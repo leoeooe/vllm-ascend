@@ -638,6 +638,7 @@ class NPUPlatform(Platform):
 
         # 8.Setup worker class, custom ops and scheduler (ascend_config -> vllm_config).
         _setup_worker_and_scheduler(vllm_config, ascend_config)
+        _validate_minedraft_scheduler_config(vllm_config, ascend_config)
 
         # 9.Validate SFA / DCP / KV and SP consistency (vllm_config)
         _validate_sfa_dcp_kv_sp(vllm_config)
@@ -1537,6 +1538,19 @@ def _setup_worker_and_scheduler(
             )
 
     _downgrade_swa_bounded_replay(vllm_config, ascend_config)
+
+
+def _validate_minedraft_scheduler_config(vllm_config: VllmConfig, ascend_config) -> None:
+    spec = vllm_config.speculative_config
+    if spec is None or spec.method != "minedraft":
+        return
+    # These forks also lack the external batch-selection gate in schedule().
+    mode = _swa_bounded_replay_unsupported_mode(ascend_config)
+    if mode is not None or vllm_config.scheduler_config.scheduler_cls is not None:
+        raise ValueError(
+            "MineDraft requires the native scheduler with external batch selection; "
+            f"disable {mode or 'scheduler_cls'} and Ascend custom scheduler modes."
+        )
 
 
 def _swa_bounded_replay_unsupported_mode(ascend_config) -> str | None:

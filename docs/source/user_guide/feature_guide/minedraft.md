@@ -113,6 +113,7 @@ VLLM_BATCH_INVARIANT=1 /home/l00998189/vllm/.venv/bin/python \
 
 - 支持固定 K、多个 batch、独立 TP 验证副本、原生 target 拒绝采样及每个引擎的解码图。单引擎内部使用同步调度，跨引擎由控制器并发驱动。
 - 初始入口只覆盖离线文本、`n=1`；不覆盖 OpenAI 在线服务、流式输出、多模态、结构化输出、PP、CP 或引擎内 DP。多验证副本由控制器管理。
+- 验证引擎必须保留原生 scheduler；Ascend 的 recompute、dyntra、profiling chunk、balance 和其他自定义 scheduler 会在配置阶段被拒绝，避免绕过外部 batch 选择。
 - 草稿侧每轮通过已确认前缀调用普通生成引擎，可利用 prefix cache；没有新增持久化草稿 KV 状态回滚协议。重复 prefill、CPU token IPC 和负载不均衡都可能抵消重叠收益。
 - JSON 中的时间区间表示进程调用的并发，包含 CPU、通信和同步开销。使用 NPU profiler 确认设备 kernel 重叠，再比较固定请求集上的吞吐、TTFT、TPOT、接受率和总设备成本。
 - 后续创新可围绕持久化草稿 KV、动态 batch 分配、每副本队列反压、K 自适应以及设备间 token 通信展开。修改时保留版本号、已验证前缀和图缓冲区所有权约束。
