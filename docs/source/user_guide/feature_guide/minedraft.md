@@ -16,7 +16,7 @@
 
 ## 五卡非对称部署
 
-| 引擎 | 物理设备 ID | TP | 职责 |
+| 引擎 | 驱动逻辑设备 ID | TP | 职责 |
 | --- | --- | --- | --- |
 | 草稿 | 0 | 1 | 为所有 batch 生成确定性草稿 |
 | 验证副本 0 | 1, 2 | 2 | 持有分配给自己的请求及 target KV cache |
@@ -24,7 +24,7 @@
 
 请求首先均匀分为 `num_batches` 个 batch，batch 固定分配到验证副本。草稿引擎轮流处理已得到验证结果的 batch。一个请求只有当前轮已经验证完成，才会向草稿引擎提交下一轮已确认前缀；版本检查防止使用旧前缀的草稿。
 
-设备参数是每个引擎子进程要写入 `ASCEND_RT_VISIBLE_DEVICES` 的物理 ID，不是外层可见设备列表中的相对下标。请只使用当前容器实际分配的设备。每个子进程在导入模型运行时前设置设备可见性，避免草稿引擎加入验证模型的 TP/HCCL 组。
+设备参数是每个引擎子进程要写入 `ASCEND_RT_VISIBLE_DEVICES` 的驱动逻辑设备 ID，不是外层可见设备列表中的相对下标。双芯片卡的物理卡号与这些 ID 不同，请用 `npu-smi info` 核对映射，并只使用当前容器实际分配的设备。每个子进程在导入模型运行时前设置设备可见性，避免草稿引擎加入验证模型的 TP/HCCL 组。
 
 在已安装匹配 CANN、torch、torch_npu 和两个源码分支的环境中，从 Ascend 仓库目录运行：
 
@@ -112,7 +112,40 @@ VLLM_BATCH_INVARIANT=1 /home/l00998189/vllm/.venv/bin/python \
     tests/e2e/pull_request/eight_card/model_runner_v2/test_minedraft.py
 ```
 
-需要最多五张可用 NPU 和 batch-invariant 算子；条件不足时测试跳过。开发沙箱没有暴露 `/dev/davinci*`，因此这些硬件测试尚未在此开发环境运行，不能据此声称 NPU 正确性、图重放或吞吐提升已经验证。
+需要最多五个可用 NPU 设备和 batch-invariant 算子；条件不足时测试跳过。
+
+### 2026-11-04 实卡验证
+
+使用 Ascend 910、CANN 9.2.1、torch 2.10.0 和 torch_npu 2.10.0.post7，通过上面的示例入口执行了以下功能测试。每项包含 8 条中英文短请求，每条生成 24 个 token；`K=3`、`max_model_len=1024`、每个 worker 的 KV cache 为 1 GiB。精确比较开启 `VLLM_BATCH_INVARIANT=1`，普通 target 基线先在独立进程中生成并退出。
+
+| 草稿 / target | TP2 验证副本 | batch | 模式 | 输出校验 | 草稿接受数 | 图重放：草稿 / 各验证 rank |
+| --- | --- | --- | --- | --- | --- | --- |
+| 0.6B / 0.6B | 2 | 4 | eager | 与已校验的图模式 192 个 token 全同 | 141/148 | 0 / 0, 0, 0, 0 |
+| 0.6B / 0.6B | 2 | 4 | 图 | 与普通 target 的 192 个 token 全同 | 141/148 | 50 / 12, 12, 12, 12 |
+| 0.6B / 0.6B | 1 | 2 | 图 | 与普通 target 的 192 个 token 全同 | 141/148 | 26 / 12, 12 |
+| 0.6B / 32B | 2 | 4 | 图 | 与普通 target 的 192 个 token 全同 | 111/219 | 83 / 21, 21, 15, 15 |
+| 0.6B / 32B | 2 | 4 | eager | 与普通 target 的 192 个 token 全同 | 111/219 | 0 / 0, 0, 0, 0 |
+
+模型为本地 Qwen3-0.6B 和 Qwen3-32B。验证副本固定使用驱动逻辑设备 `8,9` 和 `10,11`；最初草稿使用 `6`，该设备被另一任务占用后迁至 `12`，单副本测试使用 `12` 和 `8,9`。所有验证 rank 均使用 `ExternalSpeculator`，没有本地草稿模型；图模式逐 rank 检查了实际 replay，未仅以捕图成功作为通过条件。
+
+加载前面的 CANN 和 `PYTHONPATH` 环境后，32B 图模式的复现命令为（运行前重新确认设备空闲）：
+
+```bash
+VLLM_BATCH_INVARIANT=1 /home/l00998189/vllm/.venv/bin/python \
+    examples/minedraft_npu.py \
+    --target /home/d00832329/Qwen3-32B \
+    --draft /home/d00832329/Qwen3-0.6B \
+    --draft-devices 12 --verifier-devices '8,9;10,11' \
+    --num-batches 4 --num-speculative-tokens 3 --max-tokens 24 \
+    --kv-cache-memory-bytes 1073741824 --check-baseline \
+    --report minedraft-32b-graph.json
+```
+
+实测期间保留了三次失败记录：CANN `PYTHONPATH` 未保留导致 `acl` 导入失败；自动估算约 20 GiB KV cache 时首次 FIA prefill OOM；逻辑设备 `6` 被其他任务占用约 55 GiB 后，大模型拓扑的草稿引擎无法启动。补齐环境、显式使用 1 GiB KV cache、迁移草稿设备后，上表测试通过。自动容量配置下的 OOM 根因尚未确认，不能把短请求测试通过视为大 KV cache 配置已修复。
+
+正常关闭的外层等待窗口已在 vLLM 提交 `135770c955` 中修正；异常路径仍执行有界进程组终止。修正后的标准 pytest 结果为 **9 passed、26 subtests passed**，实卡运行不再出现此前的共享内存泄漏告警。Ascend 测试入口的显式 KV cache 参数在提交 `ee8fddd94` 中保存。
+
+原始 JSON、日志、`summary.json` 汇总和设备快照保存在开发机 `/home/l00998189/runtime/minedraft-validation/20261104/`。32B 的 eager/图模式输出也相互一致，单/双验证副本的小模型输出相互一致；最终设备快照确认测试进程已释放 NPU。这些结果验证短请求 greedy 正确性、批次切换、非对称副本和解码图重放；尚未验证长上下文压力、随机采样分布或吞吐提升。主机时间线中的 drafting/verification 重叠也不等价于 NPU kernel 重叠。
 
 ## 当前范围与后续研究
 
