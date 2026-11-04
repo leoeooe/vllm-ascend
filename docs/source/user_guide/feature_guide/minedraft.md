@@ -202,7 +202,7 @@ VLLM_BATCH_INVARIANT=0 /home/l00998189/vllm/.venv/bin/python \
     examples/minedraft_npu.py \
     --target /home/d00832329/Qwen3-32B \
     --draft /home/d00832329/Qwen3-0.6B \
-    --draft-devices 14 --verifier-devices '4,5;6,7' \
+    --draft-devices 14 --verifier-devices '10,11;12,13' \
     --dataset-path /home/l00998189/datasets/gsm8k/test.jsonl \
     --dataset-offset 0 --num-prompts 32 --num-batches 4 \
     --num-speculative-tokens 5 --max-tokens 128 \
@@ -212,6 +212,30 @@ VLLM_BATCH_INVARIANT=0 /home/l00998189/vllm/.venv/bin/python \
 ```
 
 该命令保存主机调用时间线，不生成整段 4,096 输出 token 的 NPU trace。主机调用交叠不能直接换算为设备计算交叠。`--profile-dir` 仍会采集整个正式生成，若添加该参数，文件体积会明显大于此前 4 条、每条 8 token 的精简采样。
+
+首次尝试沿用逻辑 `4,5;6,7` 作为验证设备。启动前只见每卡约 113 MiB 的背景上下文，随后另一组 `vLLM-Omni` 任务占用了这些设备，初始化时每卡仅余 2.72–3.20 GiB，未能加载验证模型。本次进程退出后，经用户确认，改用草稿 `14`、验证副本 `10,11` 和 `12,13`，保留原先的 TP2×2 拓扑。首次失败日志和前后设备快照保存在实验目录中，没有终止其他任务。
+
+迁移后的第一次完整生成得到 32×128 个输出 token，图重放检查通过，但新增测量代码错误地保留了预热诊断中共享的 `timeline` 列表，导致正式生成后切片得到空时间线。提交 `b33fb377d` 在生成前冻结诊断快照，并新增共享列表回归测试；修复后重新执行相同配置。缺失时间线的报告保留为 `attempt2-timeline-bug-report.json`，不用于逐轮耗时结论。数据集入口和图尺寸支持保存在前一提交 `b5312c44b`。
+
+### GSM8K 实测结果（2026-11-04）
+
+最终运行通过，32 条请求均输出 128 token，共 **4,096 token**。正式生成耗时 **7.8882 s**，包含该次请求的 prefill，不包含模型加载、图捕获、8-token 预热和退出；对应本次负载的输出速率为 519.25 token/s。它是单次运行的描述性结果，没有同条件串行 SD 或普通 target 性能基线，不能据此计算加速比。参考答案未参与输入，也没有将截断到 128 token 的输出计为标准 GSM8K 准确率。
+
+正式时间线保留 **290** 项调用：4 次 target prefill、143 次 draft、143 次 verify。为比较完整 batch 的供给速度，选取每批第 **3–21 轮**：初始 prefill 产生 1 token，每轮最多确认 K+1=6 token，因此第 21 轮之前每请求至少仍剩 7 token；这一范围保证 8 条请求仍活跃且候选长度为 5，同时跳过最初两轮的流水线填充。这里统计的是 actor 完整调用耗时，包含主机及同步开销。
+
+| 引擎 | 采样调用数 | 中位耗时 | P90 耗时 | `2 × median(Tdraft) / median(Tverify)` |
+| --- | --- | --- | --- | --- |
+| 草稿，逻辑 14 | 76 | 53.46 ms | 54.83 ms | — |
+| verifier0，逻辑 10、11 | 38 | 44.28 ms | 45.09 ms | 2.415 |
+| verifier1，逻辑 12、13 | 38 | 43.96 ms | 44.40 ms | 2.432 |
+
+此配置仍未满足 `Tdraft <= Tverify / 2`：验证耗时约 44 ms 时，草稿需要约 22 ms/批或更低，而实测约 53 ms/批。增加到每批 8 请求、K=5 后，草稿仍是供给瓶颈；不能通过较大的主机重叠比例认定两个 verifier 已被充分供满。
+
+采集增量确认草稿实际图重放 **565** 次，verifier0 两个 rank 各 **57** 次，verifier1 两个 rank 各 **60** 次。目标捕获尺寸为 `[6,12,18,36,48]`，包含完整 batch 需要的 48 token；短尾/变长情况仍可能回退 eager。原生 speculative counters 中，两个副本分别接受 **1533/2524（60.74%）**、**1516/2606（58.17%）** 个草稿 token，这不是数学答案准确率。各引擎累计 KV preemption 为 0。
+
+两个 verifier 的 verify 调用分别有 **94.20%**、**99.17%** 的时间与 draft 调用交叠；草稿与任一 verify 的主机调用交集为 **6.315 s**。这些区间包含主机工作，不能与此前 NPU profiler 的 67.58 ms 设备计算交集直接比较。本次其他物理卡有并发任务，且请求、batch 大小、K、batch invariance 和采集设置均与此前短采样不同。
+
+结果与失败记录位于 `/home/l00998189/runtime/minedraft-gsm8k/20261104/`：`report.json` 保存逐题输出和原始诊断，`analysis.json` 保存完整 batch 统计，`input-capacity.json` 保存输入长度及 KV 容量核算，`run.sh`/`run.log` 保存复现命令及日志，`after-npu.txt` 确认测试设备已释放。修复前后两次完整运行的 4,096 个输出 token 相同，但未额外执行普通 target 正确性基线。新增 CPU 测试 **8 passed**，代码检查通过。
 
 ## 当前范围与后续研究
 
