@@ -292,6 +292,24 @@ def test_a5_index_fill_uses_scatter():
     tensor.index_fill_.assert_not_called()
 
 
+@pytest.mark.parametrize("use_v2", [False, True])
+def test_minedraft_rejects_explicit_v1_runner(use_v2):
+    from types import SimpleNamespace
+
+    from vllm_ascend.platform import _validate_model_runner_config
+
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(architecture="Qwen3ForCausalLM"),
+        speculative_config=SimpleNamespace(method="minedraft"),
+        use_v2_model_runner=use_v2,
+    )
+    if use_v2:
+        _validate_model_runner_config(config)
+    else:
+        with pytest.raises(ValueError, match="MineDraft on Ascend requires Model Runner V2"):
+            _validate_model_runner_config(config)
+
+
 @pytest.mark.parametrize("packed_cache", [False, True])
 @pytest.mark.parametrize("use_v2", [False, True])
 @pytest.mark.parametrize("architecture", ["DeepseekV41ForCausalLM", "DeepseekV41DSparkModel", "DeepseekV3ForCausalLM"])

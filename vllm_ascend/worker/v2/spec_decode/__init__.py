@@ -36,6 +36,10 @@ def init_speculator(
     """
     speculative_config = vllm_config.speculative_config
     assert speculative_config is not None
+    if speculative_config.method == "minedraft":
+        from vllm.v1.worker.gpu.spec_decode.external import ExternalSpeculator
+
+        return ExternalSpeculator(vllm_config, device)
     if speculative_config.enforce_eager:
         vllm_config = copy.copy(vllm_config)
         vllm_config.compilation_config = copy.copy(vllm_config.compilation_config)

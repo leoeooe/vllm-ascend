@@ -1061,6 +1061,13 @@ def _fix_incompatible_config(vllm_config: VllmConfig) -> None:
 
 
 def _validate_model_runner_config(vllm_config: VllmConfig) -> None:
+    speculative_config = getattr(vllm_config, "speculative_config", None)
+    if (
+        speculative_config is not None
+        and speculative_config.method == "minedraft"
+        and not vllm_config.use_v2_model_runner
+    ):
+        raise ValueError("MineDraft on Ascend requires Model Runner V2 (VLLM_USE_V2_MODEL_RUNNER=1).")
     if (
         vllm_config.model_config.architecture in ("DeepseekV41ForCausalLM", "DeepseekV41DSparkModel")
         and get_current_hardware_profile().supports(HardwareCapability.DSV41_PACKED_CACHE)
