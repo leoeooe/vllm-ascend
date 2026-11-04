@@ -6,7 +6,7 @@ from tests.ut.base import TestBase
 
 
 class TestTorchNPUProfilerWrapper(TestBase):
-    def test_init_creates_underlying_profiler(self):
+    def test_init_and_options_do_not_create_underlying_profiler(self):
         from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
 
         profiler_config = ProfilerConfig(
@@ -17,9 +17,12 @@ class TestTorchNPUProfilerWrapper(TestBase):
 
         with patch.object(TorchNPUProfilerWrapper, "_create_profiler", return_value=mock_profiler) as mock_create:
             wrapper = TorchNPUProfilerWrapper(profiler_config, "dp0_pp0_tp0_dcp0_ep0_rank0")
+            wrapper.set_profiler_kwargs({"timing_only": True})
+            wrapper.set_profiler_kwargs(None)
+            wrapper.shutdown()
 
-        mock_create.assert_called_once_with(profiler_config, "dp0_pp0_tp0_dcp0_ep0_rank0")
-        self.assertIs(wrapper.profiler, mock_profiler)
+        mock_create.assert_not_called()
+        self.assertIsNone(wrapper.profiler)
 
     def test_start_stop_delegate_to_underlying_profiler(self):
         from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
@@ -30,12 +33,14 @@ class TestTorchNPUProfilerWrapper(TestBase):
         )
         mock_profiler = MagicMock()
 
-        with patch.object(TorchNPUProfilerWrapper, "_create_profiler", return_value=mock_profiler):
+        with patch.object(TorchNPUProfilerWrapper, "_create_profiler", return_value=mock_profiler) as create:
             wrapper = TorchNPUProfilerWrapper(profiler_config, "trace_name")
+            wrapper.start()
+            create.assert_called_once_with(profiler_config, "trace_name", timing_only=False)
+            self.assertIs(wrapper.profiler, mock_profiler)
+            wrapper.stop()
 
-        wrapper._start()
-        wrapper._stop()
-
+        self.assertIsNone(wrapper.profiler)
         mock_profiler.start.assert_called_once()
         mock_profiler.stop.assert_called_once()
 
@@ -71,7 +76,9 @@ class TestTorchNPUProfilerWrapper(TestBase):
 
         mock_export_type.Text = "Text"
         mock_profiler_level.Level1 = "Level1"
+        mock_profiler_level.Level0 = "Level0"
         mock_aic_metrics.PipeUtilization = "PipeUtilization"
+        mock_aic_metrics.AiCoreNone = "AiCoreNone"
         mock_profiler_activity.CPU = "CPU"
         mock_profiler_activity.NPU = "NPU"
 
@@ -113,6 +120,50 @@ class TestTorchNPUProfilerWrapper(TestBase):
         self.assertEqual(profile_kwargs["with_modules"], True)
         self.assertEqual(profile_kwargs["on_trace_ready"], mock_trace_handler_instance)
         self.assertEqual(result, mock_profiler_instance)
+
+        # Timing traces must override expensive config defaults as well as
+        # disable hardware metrics and CPU tracing, retaining NPU task timings.
+        TorchNPUProfilerWrapper._create_profiler(profiler_config, "timing", timing_only=True)
+        timing_config = mock_experimental_config.call_args.kwargs
+        self.assertEqual(timing_config["profiler_level"], "Level0")
+        self.assertEqual(timing_config["aic_metrics"], "AiCoreNone")
+        timing_profile = mock_profile.call_args.kwargs
+        self.assertEqual(timing_profile["activities"], ["NPU"])
+        for option in ("record_shapes", "with_stack", "with_modules", "with_flops", "profile_memory"):
+            self.assertFalse(timing_profile[option], option)
+        mock_trace_handler.assert_called_with("/path/to/traces", worker_name="timing", analyse_flag=False)
+
+    def test_timing_preset_is_session_scoped_and_rejects_changes_while_active(self):
+        from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
+
+        config = ProfilerConfig(profiler="torch", torch_profiler_dir="/path/to/traces")
+        timing_profiler, default_profiler = MagicMock(), MagicMock()
+        with patch.object(
+            TorchNPUProfilerWrapper, "_create_profiler", side_effect=[timing_profiler, default_profiler]
+        ) as create:
+            wrapper = TorchNPUProfilerWrapper(config, "timing")
+            wrapper.set_profiler_kwargs({"timing_only": True})
+            create.assert_not_called()
+            wrapper.start()
+            create.assert_called_once_with(config, "timing", timing_only=True)
+            with self.assertRaisesRegex(RuntimeError, "Stop the active profiler"):
+                wrapper.set_profiler_kwargs(None)
+            wrapper.stop()
+            timing_profiler.stop.assert_called_once()
+            self.assertIsNone(wrapper.profiler)
+            wrapper.set_profiler_kwargs(None)
+            self.assertEqual(create.call_count, 1)
+            wrapper.start()
+            create.assert_called_with(config, "timing", timing_only=False)
+            self.assertIs(wrapper.profiler, default_profiler)
+            default_profiler.start.assert_called_once()
+            wrapper.stop()
+            default_profiler.stop.assert_called_once()
+            self.assertEqual(create.call_count, 2)
+            with self.assertRaisesRegex(ValueError, "timing_only must be a bool"):
+                wrapper.set_profiler_kwargs({"timing_only": "true"})
+            with self.assertRaisesRegex(ValueError, "Unsupported Ascend profiler options"):
+                wrapper.set_profiler_kwargs({"unknown": True})
 
     def test_create_profiler_disabled(self):
         from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
@@ -239,18 +290,55 @@ class TestTorchNPUProfilerWrapper(TestBase):
         )
         mock_profiler = MagicMock()
 
-        with patch.object(TorchNPUProfilerWrapper, "_create_profiler", return_value=mock_profiler):
+        with patch.object(TorchNPUProfilerWrapper, "_create_profiler", return_value=mock_profiler) as create:
             wrapper = TorchNPUProfilerWrapper(profiler_config, "trace_name")
 
-        wrapper.start()
-        mock_profiler.start.assert_not_called()
+            wrapper.start()
+            create.assert_not_called()
+            mock_profiler.start.assert_not_called()
 
-        wrapper.step()
-        wrapper.step()
-        mock_profiler.start.assert_not_called()
+            wrapper.step()
+            wrapper.step()
+            create.assert_not_called()
+            mock_profiler.start.assert_not_called()
 
-        wrapper.step()
-        mock_profiler.start.assert_called_once()
+            wrapper.step()
+            create.assert_called_once_with(profiler_config, "trace_name", timing_only=False)
+            mock_profiler.start.assert_called_once()
+            wrapper.stop()
+
+    def test_cancelled_delayed_session_never_constructs_profiler(self):
+        from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
+
+        config = ProfilerConfig(profiler="torch", torch_profiler_dir="/path/to/traces", delay_iterations=3)
+        with patch.object(TorchNPUProfilerWrapper, "_create_profiler") as create:
+            wrapper = TorchNPUProfilerWrapper(config, "trace_name")
+            wrapper.set_profiler_kwargs({"timing_only": True})
+            wrapper.start()
+            wrapper.step()
+            with self.assertRaisesRegex(RuntimeError, "Stop the active profiler"):
+                wrapper.set_profiler_kwargs(None)
+            wrapper.stop()
+            wrapper.set_profiler_kwargs(None)
+            create.assert_not_called()
+            self.assertIsNone(wrapper.profiler)
+
+    def test_failed_start_stops_instance_before_next_session(self):
+        from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
+
+        config = ProfilerConfig(profiler="torch", torch_profiler_dir="/path/to/traces")
+        failed_profiler, next_profiler = MagicMock(), MagicMock()
+        failed_profiler.start.side_effect = RuntimeError("start failed")
+        with patch.object(TorchNPUProfilerWrapper, "_create_profiler", side_effect=[failed_profiler, next_profiler]):
+            wrapper = TorchNPUProfilerWrapper(config, "trace_name")
+            wrapper.start()
+            failed_profiler.stop.assert_called_once()
+            self.assertIsNone(wrapper.profiler)
+            self.assertFalse(wrapper.is_running)
+            wrapper.stop()
+            wrapper.start()
+            next_profiler.start.assert_called_once()
+            wrapper.stop()
 
     def test_step_stops_underlying_profiler_after_max_iterations(self):
         """Work matches vLLM WorkerProfiler: stop when recorded steps exceed max_iterations."""
@@ -267,12 +355,13 @@ class TestTorchNPUProfilerWrapper(TestBase):
         with patch.object(TorchNPUProfilerWrapper, "_create_profiler", return_value=mock_profiler):
             wrapper = TorchNPUProfilerWrapper(profiler_config, "trace_name")
 
-        wrapper.start()
-        mock_profiler.start.assert_called_once()
-        mock_profiler.stop.assert_not_called()
+            wrapper.start()
+            mock_profiler.start.assert_called_once()
+            mock_profiler.stop.assert_not_called()
 
-        wrapper.step()
-        mock_profiler.stop.assert_not_called()
+            wrapper.step()
+            mock_profiler.stop.assert_not_called()
 
-        wrapper.step()
-        mock_profiler.stop.assert_called_once()
+            wrapper.step()
+            mock_profiler.stop.assert_called_once()
+            self.assertIsNone(wrapper.profiler)

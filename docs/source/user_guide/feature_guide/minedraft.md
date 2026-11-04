@@ -147,6 +147,44 @@ VLLM_BATCH_INVARIANT=1 /home/l00998189/vllm/.venv/bin/python \
 
 原始 JSON、日志、`summary.json` 汇总和设备快照保存在开发机 `/home/l00998189/runtime/minedraft-validation/20261104/`。32B 的 eager/图模式输出也相互一致，单/双验证副本的小模型输出相互一致；最终设备快照确认测试进程已释放 NPU。这些结果验证短请求 greedy 正确性、批次切换、非对称副本和解码图重放；尚未验证长上下文压力、随机采样分布或吞吐提升。主机时间线中的 drafting/verification 重叠也不等价于 NPU kernel 重叠。
 
+## 小体积图模式 profiling
+
+`examples/minedraft_npu.py --profile-dir DIR` 会先完成加载、图捕获及一次不采集的预热，再向全部引擎广播 `start_profile`，等待所有 worker 确认后运行短生成，最后广播 `stop_profile`。各引擎步数不同，因此不使用相同的 `max_iterations` 截断各自时间窗。采集默认只包含 **4 条请求 × 8 个输出 token**，预热也为每条 8 个 token；这不是吞吐基准。
+
+该入口通过 `profiler_kwargs={"timing_only": True}` 选择 Ascend 的轻量设置：仅 NPU activity、`Level0`、`AiCoreNone`、Text 导出，关闭 CPU 算子、stack、modules、shapes、memory、FLOPS、L2 和算力指标。profiler 按需创建，避免未启动对象析构干扰正在采集的会话。TP worker 是 daemon 进程，采集时关闭自动解析；模型全部退出后，由主进程串行离线解析，解析时间不计入采集窗口。
+
+在前面的 CANN、`PYTHONPATH` 和 HCCL 环境中执行：
+
+```bash
+VLLM_BATCH_INVARIANT=1 /home/l00998189/vllm/.venv/bin/python \
+    examples/minedraft_npu.py \
+    --target /home/d00832329/Qwen3-32B \
+    --draft /home/d00832329/Qwen3-0.6B \
+    --draft-devices 14 --verifier-devices '4,5;6,7' \
+    --num-batches 4 --num-prompts 4 --max-tokens 8 \
+    --profile-warmup-tokens 8 --num-speculative-tokens 3 \
+    --kv-cache-memory-bytes 1073741824 \
+    --profile-dir /home/l00998189/runtime/minedraft-profile/new-capture \
+    --report /home/l00998189/runtime/minedraft-profile/new-report.json
+```
+
+运行前确认设备仍空闲，并使用空的 `--profile-dir`，避免混入旧采集。草稿使用逻辑设备 `14`（物理卡 7），两个验证副本分别使用 `4,5`（物理卡 2）和 `6,7`（物理卡 3）。`--num-prompts`、`--max-tokens` 控制采集体积；`--profile-warmup-tokens` 只影响不采集的预热。未提供 `--profile-dir` 时，示例保持原来的 8 请求、32 输出 token 默认配置。
+
+输出包括：
+
+- `mindstudio_timing.zip`：优先下载的小包，包含合并 NPU 时间线、manifest 和生成诊断。
+- `minedraft_timeline.json`：只保留各 worker 原生设备任务的完整时间事件和泳道元数据，角色名称为 `draft.tp0.npu14`、`verifier0.tp0.npu4` 等。
+- `native_timelines.zip`：可选的原生 worker 时间线包，不修改原始事件。
+- `native/*_ascend_pt/`：服务器上保留的原生采集和解析文件。
+
+下载并解压小包后，在 MindStudio Insight 中选择“导入数据”，导入 `minedraft_timeline.json`，然后打开 Timeline，按角色展开 NPU stream，框选任务范围或点击任务查看时长。官方支持本地 JSON 文件及目录导入，参见 [MindStudio 基础操作](https://github.com/Ascend/msinsight/blob/master/docs/zh/user_guide/basic_operations.md)。
+
+合并仅隔离不同 worker 的 PID，并增加角色标签；原始 `ts`、`dur` 和设备任务参数保持不变，**不把各卡首事件分别归零**。CPU/flow 事件不进入精简视图；原生文件仍保留在可选包中。查看并行关系时不要手动把不同卡的起点对齐；MindStudio 的时间偏移行为可参考[时间对齐说明](https://www.hiascend.com/document/detail/zh/mindstudio/830/GUI_baseddevelopmenttool/msascendinsightug/Insight_userguide_0053.html)。合并文件用于时间线查看，不等价于原生集群工程的通信矩阵或算子汇总；需要这些视图时使用原生数据。NPU 任务时间不包含 Python 调度与进程通信开销，主机调用区间另外保存在生成报告的 `timeline` 中。
+
+2026-11-04 的精简实测文件位于 `/home/l00998189/runtime/minedraft-profile/20261104/capture-timing/`：主 ZIP 为 **4.59 MiB**，解压后的合并 JSON 为 **80.16 MiB**，包含 328,275 条任务及元数据事件。生成窗口为 749.93 ms；采集期间的图重放次数为草稿 `20`、验证副本 0 各 rank `5`、验证副本 1 各 rank `4`。32 个输出 token 与未采集的预热结果相同。
+
+原始设备 `KERNEL_AICORE`/`KERNEL_AIVEC` 区间经并集去重后，草稿与任一验证副本的交集为 **67.58 ms**；这是本次短窗口存在设备计算重叠的证据，不是吞吐提升或请求时延估计。验收结果保存在同级父目录的 `timing-validation.json`，全部测试设备已释放。代码检查通过，Ascend profiler/合并工具 CPU 测试为 **23 passed**，vLLM 控制接口标准 pytest 为 **11 passed、32 subtests passed**。本机没有运行 MindStudio GUI，已检查 JSON 结构、原始时间戳、五个 worker 的设备任务和压缩包完整性；GUI 展示仍需在本地导入确认。
+
 ## 当前范围与后续研究
 
 - 支持固定 K、多个 batch、独立 TP 验证副本、原生 target 拒绝采样及每个引擎的解码图。单引擎内部使用同步调度，跨引擎由控制器并发驱动。
