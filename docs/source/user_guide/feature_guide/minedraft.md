@@ -29,7 +29,9 @@
 在已安装匹配 CANN、torch、torch_npu 和两个源码分支的环境中，从 Ascend 仓库目录运行：
 
 ```bash
+source /usr/local/Ascend/cann/set_env.sh
 export PYTHONPATH=/home/l00998189/vllm:/home/l00998189/vllm-ascend:${PYTHONPATH:-}
+export HCCL_NPU_SOCKET_PORT_RANGE=auto
 
 /home/l00998189/vllm/.venv/bin/python examples/minedraft_npu.py \
     --target /home/d00832329/Qwen3-32B \
@@ -38,12 +40,15 @@ export PYTHONPATH=/home/l00998189/vllm:/home/l00998189/vllm-ascend:${PYTHONPATH:
     --verifier-devices '1,2;3,4' \
     --num-batches 4 \
     --num-speculative-tokens 3 \
+    --kv-cache-memory-bytes 1073741824 \
     --report minedraft-graph-report.json
 ```
 
 该示例默认启用 `FULL_DECODE_ONLY`。添加 `--eager` 可运行无图基线。配置 `--verifier-devices '1,2' --num-batches 2` 可测试一个验证副本上的双 batch 流水线。`num_batches` 与验证副本数不同：增加 batch 不会重复加载模型。
 
 图捕获会增加启动时间和显存占用。示例限制了捕获尺寸，但是否能在单卡/双卡放下指定模型，仍取决于权重类型、设备容量、上下文和 KV cache 配置。示例不加载量化配置，需使用适合设备容量的模型或通过 Python 接口传入相应的 vLLM 参数。
+
+`--kv-cache-memory-bytes` 显式指定每个 worker 的 KV cache 字节数，优先于 `--gpu-memory-utilization` 的自动估算。上面的 1 GiB 用于示例的短请求验证；长上下文或更多并发请求需要重新计算容量。加载 CANN 环境后保留其 `PYTHONPATH`，否则 worker 可能无法导入 `acl`。
 
 ## Python 用法
 

@@ -34,6 +34,7 @@ def parse_args():
     parser.add_argument("--max-tokens", type=int, default=32)
     parser.add_argument("--max-model-len", type=int, default=1024)
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.8)
+    parser.add_argument("--kv-cache-memory-bytes", type=int, help="Explicit KV cache budget per worker, in bytes")
     parser.add_argument("--eager", action="store_true")
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--timeout", type=float, default=900)
@@ -102,6 +103,8 @@ def main():
     }
     if batch_invariant:
         engine_kwargs["block_size"] = 128
+    if args.kv_cache_memory_bytes is not None:
+        engine_kwargs["kv_cache_memory_bytes"] = args.kv_cache_memory_bytes
 
     if args.baseline_output:
         from vllm import LLM

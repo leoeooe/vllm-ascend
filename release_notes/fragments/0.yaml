@@ -2,4 +2,4 @@
 pr: 0
 entries:
   - category: feature
-    text: Added an experimental offline MineDraft integration for one independently placed draft engine serving multiple TP verifier replicas. Each engine can use its native ACL decode graphs; the example includes replay diagnostics and optional greedy-baseline verification.
+    text: Added an experimental offline MineDraft integration for one independently placed draft engine serving multiple TP verifier replicas. Each engine can use its native ACL decode graphs; the example includes replay diagnostics, explicit KV cache sizing, and optional greedy-baseline verification.
